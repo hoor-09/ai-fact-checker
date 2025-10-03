@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Knowledge Grounding Tool</title>
+    <!-- Load Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        /* Custom styles for a dark, modern look */
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: #0d1117; /* GitHub dark background */
+        }
+        .container-card {
+            max-width: 900px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        }
+        .loading-ring {
+            border: 4px solid rgba(255, 255, 255, 0.3);
+            border-top: 4px solid #4ade80; /* Tailwind green-400 */
+            border-radius: 50%;
+            width: 30px;
+            height: 30px;
+            animation: spin 1s linear infinite;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="min-h-screen flex items-center justify-center p-4">
+        <div class="container-card bg-gray-800 p-6 sm:p-10 rounded-xl w-full text-white">
+
+            <!-- Header -->
+            <h1 class="text-3xl sm:text-4xl font-extrabold text-center mb-2 text-green-400">
+                AI Knowledge Grounding Tool
+            </h1>
+            <p class="text-center text-gray-400 mb-8">
+                Ask a question. The AI will provide an answer, fact-checked and grounded with real-time web results.
+            </p>
+
+            <!-- Input Area -->
+            <div class="mb-8">
+                <textarea id="userInput" rows="3"
+                    class="w-full p-4 bg-gray-700 border border-gray-600 rounded-lg focus:ring-green-500 focus:border-green-500 text-lg resize-none"
+                    placeholder="E.g., What are the key findings from the latest Google quarterly earnings report?"
+                ></textarea>
+                <button id="submitButton"
+                    class="mt-4 w-full px-6 py-3 bg-green-600 hover:bg-green-500 rounded-lg text-white font-semibold transition duration-300 transform hover:scale-[1.01] flex items-center justify-center disabled:opacity-50"
+                    onclick="fetchData()"
+                >
+                    <span id="buttonText">Analyze & Ground Fact</span>
+                    <div id="loadingIndicator" class="loading-ring hidden ml-3"></div>
+                </button>
+            </div>
+
+            <!-- Output Area -->
+            <div id="outputContainer" class="hidden mt-8 p-6 bg-gray-700 rounded-xl border border-green-700">
+                <h2 class="text-2xl font-bold mb-4 text-green-400">Analysis Result</h2>
+                
+                <!-- AI Generated Text -->
+                <div id="generatedText" class="text-gray-200 leading-relaxed mb-6"></div>
+
+                <!-- Sources/Citations -->
+                <div id="sourcesContainer">
+                    <h3 class="text-lg font-semibold mb-2 text-gray-400 border-b border-gray-600 pb-1">Sources Used (Grounding)</h3>
+                    <ul id="sourcesList" class="space-y-2 text-sm">
+                        <!-- Sources will be injected here -->
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Error/Status Message -->
+            <div id="statusMessage" class="mt-4 text-red-400 text-center font-medium hidden"></div>
+
+        </div>
+    </div>
+
+    <script>
+        const API_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent";
+        const userInput = document.getElementById('userInput');
+        const submitButton = document.getElementById('submitButton');
+        const buttonText = document.getElementById('buttonText');
+        const loadingIndicator = document.getElementById('loadingIndicator');
+        const outputContainer = document.getElementById('outputContainer');
+        const generatedText = document.getElementById('generatedText');
+        const sourcesList = document.getElementById('sourcesList');
+        const statusMessage = document.getElementById('statusMessage');
+        
+        // IMPORTANT: The API Key is automatically provided by the platform.
+        // DO NOT change this or try to get a key from the user.
+        const apiKey = "";
+
+        /**
+         * Helper function to handle fetch with exponential backoff for robustness.
+         * @param {string} url - API URL.
+         * @param {object} options - Fetch options (method, headers, body).
+         * @param {number} retries - Remaining retries.
+         */
+        const exponentialBackoffFetch = async (url, options, retries = 3) => {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    const response = await fetch(url, options);
+                    if (response.status === 429 && i < retries - 1) {
+                        // Rate limit hit, retry after delay
+                        const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                        console.log(`Rate limit exceeded, retrying in ${delay / 1000}s...`);
+                        await new Promise(resolve => setTimeout(resolve, delay));
+                        continue;
+                    }
+                    if (!response.ok) {
+                        throw new Error(`HTTP error! status: ${response.status}`);
+                    }
+                    return response;
+                } catch (error) {
+                    if (i === retries - 1) throw error;
+                    // For other errors, log and retry
+                    console.error(`Fetch error (attempt ${i + 1}):`, error);
+                    const delay = Math.pow(2, i) * 1000 + Math.random() * 1000;
+                    await new Promise(resolve => setTimeout(resolve, delay));
+                }
+            }
+        };
+
+
+        const fetchData = async () => {
+            const query = userInput.value.trim();
+            if (!query) {
+                statusMessage.textContent = "Please enter a question or topic to analyze.";
+                statusMessage.classList.remove('hidden');
+                return;
+            }
+
+            // UI State: Loading
+            submitButton.disabled = true;
+            buttonText.textContent = "Analyzing...";
+            loadingIndicator.classList.remove('hidden');
+            outputContainer.classList.add('hidden');
+            statusMessage.classList.add('hidden');
+            generatedText.innerHTML = '';
+            sourcesList.innerHTML = '';
+
+            try {
+                // 1. Define the AI's role (System Instruction)
+                const systemPrompt = "You are an impartial, world-class fact-checker and summarizer. Your task is to analyze the user's query and provide a concise, single-paragraph summary of the key findings based on the current web search results provided by your grounding tool. Ensure your summary is objective and directly addresses the user's question. Do not add any introductory or concluding remarks.";
+                
+                const url = `${API_URL}?key=${apiKey}`;
+
+                // 2. Construct the payload with Google Search grounding enabled
+                const payload = {
+                    contents: [{ parts: [{ text: query }] }],
+                    
+                    // Crucial: Enable Google Search Grounding
+                    tools: [{ "google_search": {} }],
+
+                    systemInstruction: {
+                        parts: [{ text: systemPrompt }]
+                    },
+                };
+
+                const response = await exponentialBackoffFetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+
+                const result = await response.json();
+                const candidate = result.candidates?.[0];
+
+                if (!candidate || !candidate.content?.parts?.[0]?.text) {
+                    throw new Error("Received an empty or unexpected response from the API.");
+                }
+
+                // 3. Extract generated text and grounding sources
+                const text = candidate.content.parts[0].text;
+                let sources = [];
+                const groundingMetadata = candidate.groundingMetadata;
+                
+                if (groundingMetadata && groundingMetadata.groundingAttributions) {
+                    sources = groundingMetadata.groundingAttributions
+                        .map(attribution => ({
+                            uri: attribution.web?.uri,
+                            title: attribution.web?.title,
+                        }))
+                        .filter(source => source.uri && source.title);
+                }
+
+                // 4. Render results
+                generatedText.innerHTML = text.replace(/\n/g, '<br>');
+                
+                if (sources.length > 0) {
+                    sources.forEach((source, index) => {
+                        const listItem = document.createElement('li');
+                        listItem.className = 'flex items-start';
+                        // Add a small icon for aesthetics
+                        listItem.innerHTML = `
+                            <svg class="w-4 h-4 mr-2 mt-1 text-green-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.886a2.5 2.5 0 010-3.536m3.536 0a2.5 2.5 0 013.536 0m-4.95 0l-2.025 2.025"></path>
+                            </svg>
+                            <a href="${source.uri}" target="_blank" rel="noopener noreferrer" class="text-blue-400 hover:text-blue-300 transition duration-150 break-words">
+                                ${source.title} (<span class="text-gray-500">${new URL(source.uri).hostname}</span>)
+                            </a>
+                        `;
+                        sourcesList.appendChild(listItem);
+                    });
+                } else {
+                    sourcesList.innerHTML = '<li class="text-gray-500">No specific grounding sources were found for this query, but the answer is based on general LLM knowledge.</li>';
+                }
+                
+                outputContainer.classList.remove('hidden');
+
+            } catch (e) {
+                console.error("An error occurred during API call:", e);
+                statusMessage.textContent = `Error: Failed to analyze the query. Please check the console for details.`;
+                statusMessage.classList.remove('hidden');
+            } finally {
+                // UI State: Ready
+                submitButton.disabled = false;
+                buttonText.textContent = "Analyze & Ground Fact";
+                loadingIndicator.classList.add('hidden');
+            }
+        };
+
+    </script>
+</body>
+</html>
